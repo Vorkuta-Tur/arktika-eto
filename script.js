@@ -1,5 +1,10 @@
 const defaultImage = 'img/hero-reindeer.jpg';
 
+// Бесплатная погода без токена: Open‑Meteo (работает по координатам).
+// Документация: https://open-meteo.com/
+const VORKUTA_LAT = 67.4988;
+const VORKUTA_LON = 64.0522;
+
 const objects = [
   {
     id: 'victory-square',
@@ -240,6 +245,7 @@ const weatherBySeason = {
 
 const state = {
   season: 'summer',
+  weatherMode: 'summer', // 'summer' | 'winter' | 'now'
   selectedRouteId: 'historic-core',
   activeBookingType: 'hotel',
   selectedService: ''
@@ -284,12 +290,187 @@ let yandexMap = null;
 let yandexRouteLine = null;
 let yandexPointCollection = null;
 
+const liveWeatherState = {
+  status: 'idle', // idle | loading | ready | error | no_token
+  updatedAt: null,
+  data: null,
+  errorMessage: ''
+};
+
 function syncHeaderStyle() {
   if (!siteHeader || !heroSection) return;
   // Пока пользователь находится в hero-секции — делаем шапку "прозрачной", как на макете.
   const heroBottom = heroSection.offsetTop + heroSection.offsetHeight;
   const isHero = window.scrollY + 80 < heroBottom;
   siteHeader.classList.toggle('is-hero', isHero);
+}
+
+function formatC(value) {
+  if (typeof value !== 'number' || Number.isNaN(value)) return '—';
+  const n = Math.round(value);
+  return `${n > 0 ? '+' : ''}${n}°C`;
+}
+
+function formatMS(value) {
+  if (typeof value !== 'number' || Number.isNaN(value)) return '—';
+  return `${Math.round(value)} м/с`;
+}
+
+function getAutoSeason() {
+  // Простая логика по месяцу (можно подстроить при необходимости):
+  // Для Воркуты лето короткое, поэтому по умолчанию:
+  // июнь–август = "лето", остальное = "зима".
+  const m = new Date().getMonth() + 1; // 1..12
+  return m >= 6 && m <= 8 ? 'summer' : 'winter';
+}
+
+function formatPercent(value) {
+  if (typeof value !== 'number' || Number.isNaN(value)) return '—';
+  return `${Math.round(value)}%`;
+}
+
+function dayLengthLabel(hours) {
+  if (typeof hours !== 'number' || Number.isNaN(hours)) return '—';
+  if (hours < 6) return 'Короткий';
+  if (hours < 10) return 'Средний';
+  return 'Длинный';
+}
+
+function buildAdvice({ tempC, windMS, precipProb, precipMm }) {
+  const tips = [];
+  if (typeof tempC === 'number') {
+    if (tempC <= -10) tips.push('Тёплая экипировка');
+    else if (tempC <= 0) tips.push('Тёплая куртка');
+    else if (tempC <= 10) tips.push('Лёгкая ветровка');
+    else tips.push('Лёгкая одежда');
+  }
+
+  const wet = (typeof precipProb === 'number' && precipProb >= 40) || (typeof precipMm === 'number' && precipMm > 0);
+  if (wet) tips.push('зонт/непромокаемая обувь');
+
+  const windMax = Math.max(
+    typeof windMS === 'number' ? windMS : -Infinity,
+    typeof arguments[0]?.windGustMS === 'number' ? arguments[0].windGustMS : -Infinity
+  );
+  if (Number.isFinite(windMax) && windMax >= 8) tips.push('защита от ветра');
+
+  return tips.length ? tips.join(', ') : 'По погоде';
+}
+
+function describeWeatherCode(code) {
+  const map = new Map([
+    [0, 'Ясно'],
+    [1, 'Преимущественно ясно'],
+    [2, 'Переменная облачность'],
+    [3, 'Пасмурно'],
+    [45, 'Туман'],
+    [48, 'Туман (изморозь)'],
+    [51, 'Морось (слабая)'],
+    [53, 'Морось (умеренная)'],
+    [55, 'Морось (сильная)'],
+    [56, 'Ледяная морось (слабая)'],
+    [57, 'Ледяная морось (сильная)'],
+    [61, 'Дождь (слабый)'],
+    [63, 'Дождь (умеренный)'],
+    [65, 'Дождь (сильный)'],
+    [66, 'Ледяной дождь (слабый)'],
+    [67, 'Ледяной дождь (сильный)'],
+    [71, 'Снег (слабый)'],
+    [73, 'Снег (умеренный)'],
+    [75, 'Снег (сильный)'],
+    [77, 'Снежные зёрна'],
+    [80, 'Ливни (слабые)'],
+    [81, 'Ливни (умеренные)'],
+    [82, 'Ливни (сильные)'],
+    [85, 'Снегопад (слабый)'],
+    [86, 'Снегопад (сильный)'],
+    [95, 'Гроза'],
+    [96, 'Гроза с градом (слабая)'],
+    [99, 'Гроза с градом (сильная)']
+  ]);
+
+  if (typeof code !== 'number' || Number.isNaN(code)) return '';
+  return map.get(code) || `Код погоды: ${code}`;
+}
+
+async function fetchLiveWeatherIfNeeded(force = false) {
+  const now = Date.now();
+  const cacheMs = 10 * 60 * 1000; // 10 minutes
+
+  if (!force && liveWeatherState.updatedAt && now - liveWeatherState.updatedAt < cacheMs) {
+    return;
+  }
+
+  try {
+    liveWeatherState.status = 'loading';
+    liveWeatherState.errorMessage = '';
+
+    const url =
+      `https://api.open-meteo.com/v1/forecast?latitude=${VORKUTA_LAT}&longitude=${VORKUTA_LON}` +
+      `&current=temperature_2m,apparent_temperature,precipitation,weather_code,wind_speed_10m,wind_gusts_10m` +
+      `&hourly=precipitation_probability` +
+      `&daily=sunrise,sunset,daylight_duration` +
+      `&wind_speed_unit=ms&timezone=auto`;
+
+    const res = await fetch(url);
+
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
+    }
+
+    const json = await res.json();
+    const current = json && json.current ? json.current : null;
+    if (!current) throw new Error('Неверный ответ сервиса погоды');
+
+    // Вероятность осадков: берём почасовое значение для текущего часа (если есть).
+    let precipProb = null;
+    const hourly = json && json.hourly ? json.hourly : null;
+    if (hourly && Array.isArray(hourly.time) && Array.isArray(hourly.precipitation_probability)) {
+      const t = current.time;
+      let idx = hourly.time.indexOf(t);
+      if (idx === -1) {
+        // если точного совпадения нет — ищем ближайшее время
+        const curMs = Date.parse(t);
+        let best = -1;
+        let bestDiff = Infinity;
+        for (let i = 0; i < hourly.time.length; i++) {
+          const ms = Date.parse(hourly.time[i]);
+          const diff = Math.abs(ms - curMs);
+          if (diff < bestDiff) {
+            bestDiff = diff;
+            best = i;
+          }
+        }
+        idx = best;
+      }
+      if (idx >= 0) precipProb = hourly.precipitation_probability[idx];
+    }
+
+    // Длина дня (секунды) — берём первый день (сегодня).
+    let daylightHours = null;
+    const daily = json && json.daily ? json.daily : null;
+    if (daily && Array.isArray(daily.daylight_duration) && typeof daily.daylight_duration[0] === 'number') {
+      daylightHours = daily.daylight_duration[0] / 3600;
+    }
+
+    liveWeatherState.data = {
+      tempC: current.temperature_2m,
+      desc: describeWeatherCode(current.weather_code),
+      windMS: current.wind_speed_10m,
+      windGustMS: current.wind_gusts_10m,
+      // Осадки: мм за час (по текущим данным Open‑Meteo).
+      precipMm: current.precipitation,
+      precipProb,
+      daylightHours
+    };
+
+    liveWeatherState.status = 'ready';
+    liveWeatherState.updatedAt = now;
+  } catch (e) {
+    liveWeatherState.status = 'error';
+    liveWeatherState.data = null;
+    liveWeatherState.errorMessage = e instanceof Error ? e.message : String(e);
+  }
 }
 
 function getObjectById(id) {
@@ -418,7 +599,11 @@ function renderHero() {
 
   heroSection.className = `hero ${state.season}`;
   heroAccent.className = state.season;
-  heroBadge.textContent = state.season === 'summer' ? 'Летний сезон по Воркуте' : 'Зимний сезон по Воркуте';
+  const autoSeason = state.weatherMode === 'now' ? getAutoSeason() : null;
+  heroBadge.textContent =
+    state.season === 'summer'
+      ? (state.weatherMode === 'now' ? 'Сейчас • Авто: Лето' : 'Летний сезон по Воркуте')
+      : (state.weatherMode === 'now' ? 'Сейчас • Авто: Зима' : 'Зимний сезон по Воркуте');
 
   heroText.textContent =
     state.season === 'summer'
@@ -426,15 +611,57 @@ function renderHero() {
       : 'Зимние маршруты учитывают сокращённый световой день, точки обогрева и более компактную логистику перемещения.';
 
   heroRouteCount.textContent = String(availableRoutes.length);
-  weatherTemp.textContent = weather.temp;
-  weatherText.textContent = weather.text;
-  weatherWind.textContent = weather.wind;
-  weatherPrecip.textContent = weather.precip;
-  weatherLight.textContent = weather.light;
-  weatherAdvice.textContent = weather.advice;
+
+  // Weather block: can show seasonal mock data or live "Now" data.
+  if (state.weatherMode === 'now') {
+    if (liveWeatherState.status === 'idle') {
+      // kick off load (async)
+      fetchLiveWeatherIfNeeded(true).then(() => renderHero());
+      liveWeatherState.status = 'loading';
+    }
+
+    if (liveWeatherState.status === 'loading') {
+      weatherTemp.textContent = '…';
+      weatherText.textContent = 'Загружаем текущую погоду…';
+      weatherWind.textContent = '…';
+      weatherPrecip.textContent = '…';
+      weatherLight.textContent = weather.light;
+      weatherAdvice.textContent = weather.advice;
+    } else if (liveWeatherState.status === 'ready' && liveWeatherState.data) {
+      const d = liveWeatherState.data;
+      weatherTemp.textContent = formatC(d.tempC);
+      weatherText.textContent = d.desc ? `Сейчас: ${d.desc}` : 'Сейчас: данные получены.';
+      weatherWind.textContent =
+        typeof d.windGustMS === 'number'
+          ? `${formatMS(d.windMS)} (порывы до ${formatMS(d.windGustMS)})`
+          : formatMS(d.windMS);
+      // Осадки — показываем вероятность (%), если доступна. Иначе — мм.
+      weatherPrecip.textContent =
+        typeof d.precipProb === 'number'
+          ? formatPercent(d.precipProb)
+          : (typeof d.precipMm === 'number' ? `${d.precipMm} мм` : '—');
+
+      weatherLight.textContent = dayLengthLabel(d.daylightHours);
+      weatherAdvice.textContent = buildAdvice(d);
+    } else {
+      weatherTemp.textContent = '—';
+      weatherText.textContent = `Не удалось загрузить погоду (Сейчас): ${liveWeatherState.errorMessage || 'ошибка'}`;
+      weatherWind.textContent = '—';
+      weatherPrecip.textContent = '—';
+      weatherLight.textContent = '—';
+      weatherAdvice.textContent = '—';
+    }
+  } else {
+    weatherTemp.textContent = weather.temp;
+    weatherText.textContent = weather.text;
+    weatherWind.textContent = weather.wind;
+    weatherPrecip.textContent = weather.precip;
+    weatherLight.textContent = weather.light;
+    weatherAdvice.textContent = weather.advice;
+  }
 
   document.querySelectorAll('.season-btn').forEach((btn) => {
-    btn.classList.toggle('active', btn.dataset.season === state.season);
+    btn.classList.toggle('active', btn.dataset.season === state.weatherMode);
   });
 }
 
@@ -650,8 +877,25 @@ document.addEventListener('click', (event) => {
 
   const seasonBtn = target.closest('[data-season]');
   if (seasonBtn) {
-    state.season = seasonBtn.getAttribute('data-season');
-    renderAll();
+    const nextMode = seasonBtn.getAttribute('data-season');
+    if (!nextMode) return;
+
+    // Summer/Winter switch:
+    // - 'summer'/'winter' => меняем сезон и показываем сезонные данные.
+    // - 'now' => сезон выбирается автоматически по дате, а погода берётся "сейчас".
+    if (nextMode === 'now') {
+      // При "Сейчас" дизайн автоматически выбирается по текущей дате.
+      state.season = getAutoSeason();
+      state.weatherMode = 'now';
+      // Перерисовываем ВЕСЬ интерфейс, чтобы сезон реально переключал маршруты/карту/текст.
+      liveWeatherState.status = 'idle';
+      renderAll();
+      fetchLiveWeatherIfNeeded(true).then(() => renderHero());
+    } else {
+      state.season = nextMode;
+      state.weatherMode = nextMode;
+      renderAll();
+    }
   }
 
   const mapSeasonBtn = target.closest('[data-map-season]');

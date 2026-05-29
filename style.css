@@ -1,3 +1,5 @@
+@charset "UTF-8";
+
 :root {
   --bg: #f7fbff;
   --surface: #ffffff;
@@ -9,6 +11,8 @@
   --primary-dark: #0284c7;
   --summer: #f59e0b;
   --winter: #2563eb;
+  /* Акцент для режима "Сейчас" (выбрано вручную). */
+  --now: #10b981;
   --success: #16a34a;
   --shadow: 0 16px 40px rgba(15, 23, 42, 0.08);
   --radius-xl: 28px;
@@ -226,7 +230,8 @@ section { padding: 96px 0; }
 }
 
 .badge--weather::before {
-  content: '•';
+  /* Use escaped bullet to avoid charset issues in some hosting setups. */
+  content: '\2022';
   color: var(--primary);
   font-size: 18px;
   line-height: 0;
@@ -315,7 +320,7 @@ section { padding: 96px 0; }
 
 .season-toggle {
   /* Keep the toggle size fixed in all states. */
-  width: 210px;
+  width: 320px;
 }
 
 .season-btn {
@@ -483,6 +488,13 @@ section { padding: 96px 0; }
 .season-btn.active.winter,
 .map-season-btn.active.winter {
   background: var(--winter);
+  color: white;
+}
+
+.season-btn.active.now,
+.season-btn.active[data-season="now"] {
+  /* Плашка, как у активного сезона, но для "Сейчас". */
+  background: var(--now);
   color: white;
 }
 
