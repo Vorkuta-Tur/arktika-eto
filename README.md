@@ -1,2 +1,1 @@
-# arktika-eto
-1232
+# IP
