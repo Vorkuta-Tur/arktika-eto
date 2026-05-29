@@ -248,6 +248,7 @@ section { padding: 96px 0; }
   position: absolute;
   inset: 0;
   pointer-events: none;
+  transition: none !important;
   background: linear-gradient(
     90deg,
     rgba(15, 23, 42, 0) 0%,
@@ -258,13 +259,15 @@ section { padding: 96px 0; }
   );
 }
 
-.hero.summer::before {
+/* Keep the overlay gradient STATIC across seasons (no visual change on Summer/Winter toggle). */
+.hero.summer::before,
+.hero.winter::before {
   background: linear-gradient(
     90deg,
     rgba(15, 23, 42, 0) 0%,
     rgba(15, 23, 42, 0.06) 26%,
-    rgba(255, 255, 255, 0.44) 54%,
-    rgba(255, 255, 255, 0.84) 72%,
+    rgba(255, 255, 255, 0.46) 56%,
+    rgba(255, 255, 255, 0.86) 74%,
     rgba(255, 255, 255, 0.92) 100%
   );
 }
